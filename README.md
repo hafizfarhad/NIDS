@@ -49,6 +49,9 @@ The NIDS model achieves excellent performance on the NSL-KDD test dataset:
 
 ## System Architecture
 
+![Model Analysis](architecture.png)
+
+
 The NIDS consists of two main components:
 
 1. **Training Pipeline (`train_nids_model.py`)**
@@ -57,7 +60,7 @@ The NIDS consists of two main components:
    - Optimizes detection thresholds for different security needs
    - Generates comprehensive performance analysis
 
-2. **Detection System (`run_nids_detector.py`)**
+2. **Detection System (`run_nids.py`)**
    - Captures live network traffic using Scapy
    - Extracts and analyzes packet features
    - Uses the trained model to identify anomalous packets
@@ -84,6 +87,8 @@ The system successfully identified:
 ## Technical Implementation
 
 ### Model Architecture
+
+
 
 The neural network model uses a multi-layer architecture with batch normalization and dropout for regularization:
 
@@ -147,7 +152,7 @@ This will:
 ### Running the Detection System
 
 ```bash
-sudo $(which python3) python3 run_nids.py
+sudo $(which python3) run_nids.py
 ```
 
 This will:
