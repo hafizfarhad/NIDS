@@ -15,6 +15,8 @@ try:
     import netifaces
     import datetime
     import threading
+    import logging
+    from logging.handlers import RotatingFileHandler
     warnings.filterwarnings('ignore')
     
     print("Libraries imported successfully!")
@@ -22,21 +24,40 @@ except ImportError as e:
     print(f"Error importing libraries: {e}")
     print("Please run the pip install command above to install all required packages.")
 
+# Configure logging
+LOG_FILE = "nids_alerts.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3),  # 5MB per file, 3 backups
+        logging.StreamHandler()
+    ]
+)
+
 # PyTorch model definition (must match the one used in training)
 class NIDSModel(nn.Module):
-    def __init__(self, input_size):
+    def __init__(self, input_size, dropout_rate=0.3):
         super(NIDSModel, self).__init__()
+        
+        # Using the same architecture as ImprovedNIDSModel from training
         self.net = nn.Sequential(
-            nn.Linear(input_size, 64),
+            nn.Linear(input_size, 128),
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.BatchNorm1d(128),
+            nn.Dropout(dropout_rate),
+            
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.BatchNorm1d(64),
+            nn.Dropout(dropout_rate),
+            
             nn.Linear(64, 32),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()
+            nn.BatchNorm1d(32),
+            nn.Dropout(dropout_rate / 2),
+            
+            nn.Linear(32, 1)
         )
         
     def forward(self, x):
@@ -427,51 +448,48 @@ class NIDSPacketCapture:
         if len(self.suspicious_packets) > max_history:
             self.suspicious_packets = self.suspicious_packets[-max_history:]
             
+    # Centralized severity mapping for alerts
+    ALERT_SEVERITY = {
+        'PORT_SCAN': 'HIGH',
+        'STEALTH_SCAN': 'HIGH',
+        'PING_SCAN': 'MEDIUM',
+        'POSSIBLE_DOS': 'HIGH',
+        'ANOMALY': 'MEDIUM'
+    }
+
+    def log_message(message):
+        """Log a message using the logging module."""
+        logging.info(message)
+
+    def log_alert(alert_type, packet_details=None):
+        """Log an alert with severity and details using the logging module."""
+        severity = self.ALERT_SEVERITY.get(alert_type, 'MEDIUM')
+        alert_message = f"ALERT: {alert_type} detected with severity {severity}."
+        logging.warning(alert_message)
+        if packet_details:
+            logging.warning(f"Details: {packet_details}")
+
     def log_detailed_alert(self, alert_type, packet_details):
-        """
-        Create a detailed log entry for an alert
-        
-        Parameters:
-        -----------
-        alert_type : str
-            Type of alert (e.g., 'PORT_SCAN', 'POSSIBLE_DOS')
-        packet_details : dict
-            Dictionary with packet details
-        """
+        """Create a detailed log entry for an alert."""
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Create a descriptive alert message based on attack type
-        if alert_type == 'PORT_SCAN':
-            alert_msg = f"PORT SCAN detected from {packet_details['src_ip']} targeting {packet_details['dst_ip']}"
-            severity = "HIGH" 
-        elif alert_type == 'STEALTH_SCAN':
-            alert_msg = f"STEALTH SCAN detected from {packet_details['src_ip']} using {packet_details['flags']} flags"
-            severity = "HIGH"
-        elif alert_type == 'PING_SCAN':
-            alert_msg = f"PING SCAN detected from {packet_details['src_ip']}"
-            severity = "MEDIUM"
-        elif alert_type == 'POSSIBLE_DOS':
-            alert_msg = f"Possible DoS attack from {packet_details['src_ip']} (packet size: {packet_details['size']} bytes)"
-            severity = "HIGH"
-        else:
-            alert_msg = f"Anomalous traffic from {packet_details['src_ip']} to {packet_details['dst_ip']}"
-            severity = "MEDIUM"
-        
-        # Format the detailed alert
-        detailed_alert = f"[{timestamp}] {severity} ALERT: {alert_msg}"
-        detailed_alert += f"\n  Source: {packet_details['src_ip']}:{packet_details['src_port']}"
-        detailed_alert += f"\n  Destination: {packet_details['dst_ip']}:{packet_details['dst_port']}"
-        detailed_alert += f"\n  Protocol: {packet_details['protocol']} Flags: {packet_details['flags']}"
-        detailed_alert += f"\n  Size: {packet_details['size']} bytes"
-        detailed_alert += f"\n  Anomaly Score: {packet_details['prediction_score']:.4f}"
-        
-        # Log to console with color
-        print(f"\n🚨 {detailed_alert}")
-        
-        # Log to file
-        if self.log_file:
-            with open(self.log_file, 'a') as f:
-                f.write(f"{detailed_alert}\n\n")
+        severity = self.ALERT_SEVERITY.get(alert_type, 'MEDIUM')  # Use self.ALERT_SEVERITY
+        alert_msg = f"{alert_type} detected from {packet_details['src_ip']} to {packet_details['dst_ip']}"
+
+        detailed_alert = {
+            "timestamp": timestamp,
+            "severity": severity,
+            "alert_message": alert_msg,
+            "source_ip": packet_details['src_ip'],
+            "source_port": packet_details['src_port'],
+            "destination_ip": packet_details['dst_ip'],
+            "destination_port": packet_details['dst_port'],
+            "protocol": packet_details['protocol'],
+            "flags": packet_details['flags'],
+            "size": packet_details['size'],
+            "anomaly_score": packet_details['prediction_score']
+        }
+
+        logging.warning(f"ALERT: {detailed_alert}")
 
     def packet_callback(self, packet):
         """
@@ -486,6 +504,14 @@ class NIDSPacketCapture:
             self.packet_count += 1
             self.total_packets += 1
             
+            # Ensure localhost (127.0.0.1) is not ignored unless explicitly added to trusted hosts
+            if not hasattr(self, 'trusted_hosts'):
+                self.trusted_hosts = set()
+
+            # Remove implicit trust for localhost
+            if '127.0.0.1' in self.trusted_hosts:
+                self.trusted_hosts.remove('127.0.0.1')
+                
             # Initialize trusted hosts if not already
             if not hasattr(self, 'trusted_hosts'):
                 self.trusted_hosts = set()
@@ -506,7 +532,9 @@ class NIDSPacketCapture:
                 packet_copy = packet.copy()
                 
                 # Extract features from the packet
+                logging.debug(f"Captured packet: {packet.summary()}")
                 features = self.extract_features_from_packet(packet)
+                logging.debug(f"Extracted features: {features}")
 
                 # Add to buffer with the original packet reference
                 self.packet_buffer.append((features, packet_copy))
@@ -547,33 +575,11 @@ class NIDSPacketCapture:
         except Exception as e:
             print(f"Error cleaning up connections: {e}")
 
-    def log_message(self, message):
-        """Log a message to both console and log file"""
-        print(message)
-        if self.log_file:
-            with open(self.log_file, 'a') as f:
-                f.write(f"{message}\n")
-
-    def log_alert(self, alert_message, packet_details=None):
-        """Log an alert with timestamp and details"""
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        alert = f"[{timestamp}] ALERT: {alert_message}"
-        
-        print("\n🚨 " + alert)
-        
-        if self.log_file:
-            with open(self.log_file, 'a') as f:
-                f.write(f"{alert}\n")
-                if packet_details:
-                    f.write(f"Details: {packet_details}\n\n")
-
     def process_buffer(self):
-        """
-        Process the buffered packets and detect anomalies
-        """
+        """Process the buffered packets and detect anomalies."""
         if not self.packet_buffer:
             return
-            
+
         try:
             print(f"Processing {len(self.packet_buffer)} packets...")
 
@@ -607,7 +613,7 @@ class NIDSPacketCapture:
 
             # Find anomalous packets
             anomalous_indices = np.where(y_pred_prob > self.alert_threshold)[0]
-            
+
             # Count anomalous packets
             anomalous_packets = len(anomalous_indices)
             self.attack_count += anomalous_packets
@@ -615,33 +621,33 @@ class NIDSPacketCapture:
 
             # Process and log each anomalous packet
             if anomalous_packets > 0:
-                alert_percentage = (anomalous_packets / len(self.packet_buffer)) * 100
-                
+                alert_percentage = (anomalous_packets / len(self.packet_buffer)) * 100 if len(self.packet_buffer) > 0 else 0
+
                 # General alert message
                 print(f"\n🚨 Detected {anomalous_packets} potential intrusions ({alert_percentage:.2f}% of traffic)!")
-                
+
                 # Process each anomalous packet for detailed logging
                 for idx in anomalous_indices:
                     # Get the original packet and extract details
                     original_packet = packets_list[idx]
                     details = self.extract_packet_details(original_packet)
                     details['prediction_score'] = y_pred_prob[idx]
-                    
+
                     # Create detailed log based on attack type
                     if details['attack_type'] != 'unknown':
                         self.log_detailed_alert(details['attack_type'], details)
                     else:
                         # Generic anomaly
                         self.log_detailed_alert('ANOMALY', details)
-            
+
             # Show periodic statistics and remaining time
             elapsed_time = time.time() - self.start_time
             if elapsed_time >= 10:  # Update stats every 10 seconds
                 self.show_status_update()
-            
+
             # Clear the buffer
             self.packet_buffer = []
-            
+
         except Exception as e:
             print(f"Error processing buffer: {e}")
             import traceback
@@ -654,22 +660,19 @@ class NIDSPacketCapture:
         packets_per_second = self.packet_count / elapsed_time if elapsed_time > 0 else 0
         attack_percentage = (self.attack_count / self.packet_count) * 100 if self.packet_count > 0 else 0
         
-        status_msg = "\n--- NIDS Status Update ---"
-        status_msg += f"\nRuntime: {elapsed_time:.1f} seconds"
-        status_msg += f"\nPackets analyzed: {self.packet_count} ({packets_per_second:.1f} packets/sec)"
-        status_msg += f"\nPotential attacks detected: {self.attack_count} ({attack_percentage:.2f}%)"
+        status_msg = {
+            "runtime": f"{elapsed_time:.1f} seconds",
+            "packets_analyzed": self.packet_count,
+            "packets_per_second": f"{packets_per_second:.1f}",
+            "potential_attacks_detected": self.attack_count,
+            "attack_percentage": f"{attack_percentage:.2f}%"
+        }
         
-        # Add remaining time if end_time is set
         if self.end_time:
             remaining = max(0, self.end_time - time.time())
-            status_msg += f"\nRemaining time: {remaining:.1f} seconds"
+            status_msg["remaining_time"] = f"{remaining:.1f} seconds"
         
-        status_msg += "\n--------------------------"
-        
-        print(status_msg)
-        if self.log_file:
-            with open(self.log_file, 'a') as f:
-                f.write(status_msg + "\n")
+        logging.info(f"STATUS UPDATE: {status_msg}")
         
         # Reset counters but keep the start time for next interval
         self.packet_count = 0

@@ -1,0 +1,15 @@
+=== NIDS Log File ===
+Start time: 2025-05-07 01:45:21
+Interface: wlo1
+==================================================
+
+
+Packet capture ended with errors.
+
+=== Final Statistics ===
+Total runtime: 13.4 seconds
+Total packets analyzed: 9
+Total potential attacks detected: 7
+Overall attack percentage: 77.78%
+End time: 2025-05-07 01:45:39
+==================================================
